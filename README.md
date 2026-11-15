@@ -42,6 +42,3 @@ python -m src.uaibench.analyze_results
 
 `python -m src.uaibench.test_metrics` checks the metric implementation. MBSRec is not included here; see its official
 release at https://github.com/Shereen-Elsayed/MBSRec.
-
-Additional results (standard-protocol ranks, conversion fine-tuning, static-graph models) are in
-[results/README.md](results/README.md).
