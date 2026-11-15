@@ -1,14 +1,3 @@
-"""Train an MBSR model and score VNB-Bench and the standard protocols.
-
-  python -m src.uaibench.train_mbsr <run> <model> [seed]
-  model in {mbstr, pbat, mbht, missl, mbgen}
-
-Training follows each official release (mbsr_models.*.hp): per-dataset configuration, training-instance
-sampling, loss, gradient accumulation, and early stopping after hp["patience"] epochs without improvement on
-each protocol's validation metric, within hp["max_epochs"]. Validation uses fixed subsamples of at most 10,000
-queries / instances; test scoring uses all of them. Each protocol keeps the checkpoint that is best on its own
-validation metric.
-"""
 
 import json
 import os
