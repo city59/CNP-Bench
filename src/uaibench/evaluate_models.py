@@ -1,18 +1,3 @@
-"""Evaluate all scorers on UAIBench and on two standard protocols.
-
-python -m src.uaibench.evaluate_models <run> [n_boot]
-
-Scorers
-  random, recency, frequency, cart_first, popularity   behavior heuristics (as in build.scores)
-  gbdt        gradient-boosted trees trained on training-period UAI candidates to predict conversion
-  sasrec_t, sasrec_mb, mbstr, pbat                   neural models (scores from models_seq.py)
-
-Protocols
-  uai        UAIBench test queries: conversion / re-engagement ccNDCG@10, conditional-conversion AUC
-  std        first test-period purchase per user, 1 positive + 99 uniform negatives excluding the user's history
-  stdfull    same instances, full-catalog ranking with previously purchased items masked
-All standard metrics are tie-aware (expected value under random tie-breaking).
-"""
 
 import json
 import math
@@ -69,7 +54,6 @@ def eval_uai(df: pd.DataFrame, score_cols: dict, k: int = 10) -> pd.DataFrame:
 
 
 def tie_aware(gt: np.ndarray, ties: np.ndarray, k: int = 10) -> tuple:
-    """Expected HR@k and NDCG@k when the positive is uniformly placed among its ties."""
     hr, nd = np.zeros(len(gt)), np.zeros(len(gt))
     for j, (g, t) in enumerate(zip(gt.astype(np.int64), ties.astype(np.int64))):
         pos = np.arange(g, g + t + 1)
@@ -85,7 +69,6 @@ def boot(x: np.ndarray, n_boot: int, seed: int = 2026) -> dict:
 
 
 def std_features(d, items_needed, uids, tss, W):
-    """Per (instance, candidate) history features from events strictly before the purchase time."""
     e = d["events"]
     key = e["u"].astype(np.int64) * (1 << 31) + (e["ts"] - e["ts"].min())
     order = np.argsort(key, kind="stable")
@@ -120,8 +103,6 @@ def main() -> None:
     ev = pd.DataFrame(dict(np.load(d_dir / "uai_eval.npz")))
     std = dict(np.load(d_dir / "std_eval.npz"))
     events = dict(np.load(d_dir / "events.npz"))
-    # --- GBDT on training-period candidates. Training-period popularity would include each training anchor's
-    # own future purchase, so training rows use point-in-time popularity (all users' purchases before day t).
     bc = np.load(ROOT / "data/processed" / run / "buy_counts_all_users.npz")
     o = np.lexsort((bc["day"], bc["item"]))
     bkey = bc["item"][o].astype(np.int64) * 65536 + bc["day"][o]
@@ -134,7 +115,6 @@ def main() -> None:
                                         validation_fraction=0.1, n_iter_no_change=20, random_state=2026)
     gb.fit(gbdt_features(tr), y)
     result = {"run": run, "gbdt": {"n_train": int(len(tr)), "pos_rate": float(y.mean()), "iters": int(gb.n_iter_)}}
-    # --- UAIBench
     test = ev[ev.split == 2].reset_index(drop=True)
     sc = heuristic_scores(test, 2026)
     sc["gbdt"] = gb.predict_proba(gbdt_features(test))[:, 1]
@@ -148,9 +128,6 @@ def main() -> None:
     qm = eval_uai(test, sc)
     result["uai"] = {col: user_macro(qm, col, n_boot, 2026) for col in qm.columns if ":" in col}
     qm.to_csv(d_dir / "uai_query_metrics_test.csv.gz", index=False)
-    # --- diagnostic: does a model's score carry information beyond the behavior features? Model scores exist
-    # for the validation period, so both GBDTs are fit there (features only / features + model score and its
-    # within-query rank) and evaluated on the test period.
     val = ev[ev.split == 1].reset_index(drop=True)
     yv = (val.label.to_numpy() == CONVERTED).astype(int)
     qv = val.u.to_numpy().astype(np.int64) * SHIFT + val.t.to_numpy()
@@ -176,12 +153,10 @@ def main() -> None:
     if len(stack) > 1:
         qs = eval_uai(test, stack)
         result["stack"] = {col: user_macro(qs, col, n_boot, 2026) for col in qs.columns if col.endswith(":cc_ndcg_conv")}
-    # --- standard protocols
     m2 = std["split"] == 2
     uids, tss, pos, negs = std["uid"][m2], std["ts"][m2], std["pos"][m2], std["negs"][m2]
     cands = np.concatenate([pos[:, None], negs], 1)
     feats = std_features({"events": events}, cands, uids, tss, W)
-    # popularity over all users' training purchases, mapped to the model vocabulary
     g1 = pass1(sorted((ROOT / "data/processed" / run).glob("bucket_*.npz")), Config())
     pop_full = np.zeros(meta["n_items"] + 1)
     idx = np.searchsorted(g1["train_items"], g1["pop_items"])
@@ -207,8 +182,6 @@ def main() -> None:
         ties = (s[:, 1:] == s[:, :1]).sum(1)
         hr, nd = tie_aware(gt, ties)
         res_std[n] = {"hr10": boot(hr, n_boot), "ndcg10": boot(nd, n_boot)}
-    # full-catalog ranking for heuristics/GBDT. Untouched items carry a catalog score (constant, popularity, or the
-    # GBDT score of an item without history); history items are scored exactly; previous purchases are masked.
     zero = pd.DataFrame({"u": np.arange(len(pop_full)), "t": 0, "cnt_w": 0.0, "cnt_all": 0.0, "cart_w": 0.0, "cart_all": 0.0,
                          "fav_all": 0.0, "last_ts": 0.0, "first_day": 0, "pop": pop_full})
     upop, inv = np.unique(pop_full, return_inverse=True)
@@ -251,7 +224,6 @@ def history_index(e):
 
 
 def full_rank_counts(n, ps, pos_item, uid, ts, hist, cat, cat_sorted, pop_full, gb, W):
-    """Number of catalog items scored above the positive and tied with it (positive excluded)."""
     kk, ii, bb, tt, dd, t0 = hist
     s = np.searchsorted(kk, int(uid) * (1 << 31), side="left")
     t_end = np.searchsorted(kk, int(uid) * (1 << 31) + (int(ts) - t0), side="left")

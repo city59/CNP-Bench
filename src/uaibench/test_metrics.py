@@ -22,7 +22,7 @@ def test_tie_aware_equals_permutation_average():
 def test_cc_ndcg_bounds():
     gains = np.array([1.0, 0.5, 0.0, 0.0])
     assert math.isclose(cc_ndcg(gains, np.array([4.0, 3, 2, 1])), 1.0)
-    assert math.isclose(cc_ndcg(gains, np.zeros(4)), 0.0, abs_tol=1e-12)  # all tied == random
+    assert math.isclose(cc_ndcg(gains, np.zeros(4)), 0.0, abs_tol=1e-12)
     assert math.isnan(cc_ndcg(np.zeros(3), np.arange(3.0)))
     vals = [cc_ndcg(gains, np.array(p, float)) for p in itertools.permutations(range(4))]
     assert math.isclose(np.mean(vals), 0.0, abs_tol=1e-12)

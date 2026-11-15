@@ -1,13 +1,11 @@
 #!/bin/bash
-# Fetch the official model code into third_party/ at pinned commits, then verify the files.
 set -e
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-fetch() {  # fetch <dest> <repo> <commit> <src>:<dst> ...
+fetch() {
   dest=$1 repo=$2 commit=$3; shift 3
-  # core.autocrlf=false is stored in the clone, so the checkout keeps upstream line endings for the hash check
   git clone --quiet -c core.autocrlf=false "$repo" "$tmp/$dest"
   git -C "$tmp/$dest" checkout --quiet "$commit"
   mkdir -p "third_party/$dest"

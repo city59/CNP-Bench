@@ -1,23 +1,3 @@
-"""Multi-behavior sequential recommenders behind one interface.
-
-MB-STR, PBAT     official model code (third_party/mbstr, third_party/pbat)
-MBHT             official model code (third_party/mbht), loaded through a minimal RecBole shim
-MISSL            official model code (third_party/missl)
-MBGen            official model code (third_party/mbgen), see mbgen.py
-
-Training follows the official releases: their per-dataset configurations, their training-instance sampling,
-their losses (exact full softmax over the item vocabulary where the release uses it, computed in chunks), and
-their early-stopping rules (hp["patience"] non-improving epochs, hp["max_epochs"]).
-
-Every wrapper exposes
-  L                      input length (events)
-  hp                     training hyperparameters of the original paper / release
-  train_loss(batch, rng) loss on a batch built by `batches`
-  state(items, behs, uids) user state at the end of a left-padded prefix (B x L)
-  score(h, cands)        purchase scores of candidate items (R x C)
-  full(h)                purchase scores over items 1..N (B x N)
-Behavior ids are 1..4 = view, favorite, cart, buy. Item ids are 1..N.
-"""
 
 import importlib.util
 import sys
@@ -32,13 +12,10 @@ from torch.utils.checkpoint import checkpoint
 
 ROOT = Path(__file__).resolve().parents[2]
 BUY = 4
-CHUNK_ELEMS = 2 ** 26  # logits materialized at once by the chunked full softmax (M x chunk)
+CHUNK_ELEMS = 2 ** 26
 
 
 def _full_ce(z, pos_logit, logits_fn, V):
-    """Exact softmax cross-entropy over all V output rows (as nn.CrossEntropyLoss on M x V logits), computed in
-    item chunks whose logits are recomputed in the backward pass, so memory holds one chunk at a time.
-    z: M x H inputs of logits_fn(z, start, end) -> M x (end - start); pos_logit: M target logits."""
     chunk = max(4096, CHUNK_ELEMS // max(1, len(z)))
     parts = [checkpoint(lambda zz, s=s, e=min(s + chunk, V): torch.logsumexp(logits_fn(zz, s, e), 1), z)
              for s in range(0, V, chunk)]
@@ -46,7 +23,6 @@ def _full_ce(z, pos_logit, logits_fn, V):
     return (lse - pos_logit).mean()
 
 
-# ------------------------------------------------------------------ MB-STR and PBAT (official code)
 def _import_models(name):
     sys.modules.setdefault("pytorch_lightning", types.SimpleNamespace(LightningModule=nn.Module))
     sys.path.insert(0, str(ROOT / "third_party" / name))
@@ -59,19 +35,16 @@ def _import_models(name):
 
 
 class ClozeMB(nn.Module):
-    """MB-STR / PBAT: BERT-style cloze over all behaviors; a purchase-tagged [MASK] is appended at inference."""
 
     def __init__(self, kind, n_items, n_users, ds):
         super().__init__()
         self.kind, self.n_items = kind, n_items
-        # released configurations (src/configs/{ijcai,retail}*.yaml of both repositories); the three Alibaba logs
-        # use the IJCAI configuration: batch 32 per GPU x 2 GPUs (ddp) x 4 accumulated batches, mask 0.3
         self.L, self.d = 50, 16
         retail = ds == "retailrocket"
         self.hp = {"batch": 128 if retail else 32, "accum": 1 if retail else 8, "lr": 1e-3, "wd": 1e-6,
                    "betas": (0.9, 0.999), "mask_prob": 0.2 if retail else 0.3, "dropout": 0.2, "layers": 2,
                    "heads": 2, "d": 16, "max_len": 50, "loss": "full softmax", "config": "retail" if retail else "ijcai",
-                   "patience": 10, "max_epochs": 1000}  # Lightning EarlyStopping(patience=10), default max_epochs
+                   "patience": 10, "max_epochs": 1000}
         if kind == "mbstr":
             m = _import_models("mbstr")
             self.backbone = m.BERT(max_len=self.L, num_items=n_items, n_layer=2, n_head=2, n_b=4, d_model=self.d,
@@ -100,8 +73,6 @@ class ClozeMB(nn.Module):
         yield from data.cloze_windows(self.L, self.hp["batch"], rng)
 
     def train_loss(self, batch, rng):
-        """RecTrainDataset + training_step: every event is masked with probability mask_prob, and the head's
-        logits over the vocabulary (num_items + 1 rows) enter a full softmax cross-entropy."""
         items, behs, uids = batch
         m = (torch.rand(items.shape, device=items.device) < self.hp["mask_prob"]) & (items > 0)
         if not m.any():
@@ -143,7 +114,6 @@ class ClozeMB(nn.Module):
         return tok.weight[1:self.n_items + 1].detach().cpu().numpy()
 
 
-# ------------------------------------------------------------------ MBHT (official RecBole-based code)
 class _Enum:
     def __getattr__(self, k):
         return k
@@ -177,21 +147,18 @@ class _FakeDataset:
         self.field2token_id = {"item_type_list": {"0": BUY}}
 
     def num(self, field):
-        return self.n_items + 1  # RecBole counts the padding id; ids 1..N, [MASK] = N+1
+        return self.n_items + 1
 
 
 RECBOLE_NAMES = {"taobao": "tmall_beh", "tmall": "tmall_beh", "ijcai15": "ijcai_beh", "retailrocket": "retail_beh"}
 
 
 class RecBoleMB(nn.Module):
-    """MBHT: cloze over the behavior sequence plus the last purchase (official reconstruct_train_data)."""
 
     def __init__(self, kind, n_items, n_users, ds):
         super().__init__()
         self.kind, self.n_items = kind, n_items
         name = RECBOLE_NAMES[ds]
-        # MAX_ITEM_LIST_LENGTH is 200 and the released layers hard-code a length of 200 *after* the [MASK] or last
-        # purchase is appended, so histories hold at most 199 events
         self.L = 199
         cfg = {"USER_ID_FIELD": "session_id", "ITEM_ID_FIELD": "item_id", "LIST_SUFFIX": "_list",
                "ITEM_LIST_LENGTH_FIELD": "item_length", "NEG_PREFIX": "neg_",
@@ -199,20 +166,15 @@ class RecBoleMB(nn.Module):
                "attn_dropout_prob": 0.5, "hidden_act": "gelu", "layer_norm_eps": 1e-12, "initializer_range": 0.02,
                "mask_ratio": 0.2, "loss_type": "CE", "dataset": name, "enable_ms": 1}
         cfg["MAX_ITEM_LIST_LENGTH"] = 200
-        # run_MBHT.py
         cfg.update({"enable_hg": 1, "hyper_len": 10 if name == "ijcai_beh" else 6,
                     "scales": [5, 4, 20] if name == "retail_beh" else [10, 4, 20]})
         cls = _load_recbole_model("mbht", "mbht.py", "MBHT")
         batch = 32 if name == "ijcai_beh" else 64
         self.m = cls(cfg, _FakeDataset(n_items))
         if int(torch.__version__.split(".")[0]) >= 2:
-            # mbht.py build_Gs_unique indexes a CPU sequence with topk indices of the GPU similarity matrix, which
-            # PyTorch 1.x allows and 2.x rejects. Passing the similarity on the CPU gives the same hypergraph (the
-            # function moves each G back to the sequence's device) and keeps gradients; third_party is unchanged.
             build = self.m.build_Gs_unique
             self.m.build_Gs_unique = lambda seqs, item_sim, group_len: build(seqs, item_sim.cpu(), group_len)
-        self.infer_bs = 16  # MBHT builds a dense batch hypergraph; cost is quadratic in B
-        # recbole/properties/overall.yaml: epochs 300, stopping_step 10 (stops once 11 epochs fail to improve)
+        self.infer_bs = 16
         self.hp = {"batch": batch, "lr": 1e-3, "wd": 0.0, "betas": (0.9, 0.999), "d": 64, "max_len": 200,
                    "dropout": 0.5, "mask_ratio": 0.2, "layers": 2, "heads": 2, "loss": "full softmax (CE)",
                    "patience": 11, "max_epochs": 300,
@@ -220,7 +182,7 @@ class RecBoleMB(nn.Module):
 
     @staticmethod
     def _right(items, behs):
-        order = torch.sort((items == 0).int(), dim=1, stable=True).indices  # events first, order kept
+        order = torch.sort((items == 0).int(), dim=1, stable=True).indices
         return items.gather(1, order), behs.gather(1, order)
 
     def batches(self, data, rng):
@@ -234,7 +196,7 @@ class RecBoleMB(nn.Module):
         n_mask = torch.count_nonzero(pos_items, dim=1)
         out = self.m.forward(mseq, tseq, mask_positions_nums=(midx, n_mask), session_id=uids)
         sel = pos_items > 0
-        W = self.m.item_embedding.weight  # calculate_loss: logits over every row of the item table
+        W = self.m.item_embedding.weight
         outs = out if isinstance(out, list) else [out]
         loss = 0.0
         for o in outs:
@@ -249,7 +211,7 @@ class RecBoleMB(nn.Module):
         seq, typ = self.m.reconstruct_test_data(it, n, bh)
         out = self.m.forward(seq, typ)
         outs = out if isinstance(out, list) else [out]
-        return torch.cat([self.m.gather_indexes(o, n) for o in outs], 1)  # B x (levels * H)
+        return torch.cat([self.m.gather_indexes(o, n) for o in outs], 1)
 
     def score(self, h, cands):
         hl = h.view(len(h), -1, self.hp["d"])
@@ -261,17 +223,9 @@ class RecBoleMB(nn.Module):
         return torch.stack([hl[:, j] @ w.T for j in range(hl.shape[1])], 0).max(0).values
 
 
-# ------------------------------------------------------------------ MISSL (official code, third_party/missl)
 class MISSLMB(nn.Module):
-    """MISSL (Wu et al., ICDE 2024; github.com/qianlima-lab/MISSL @ 44a9847, built on MB-STR): a causal transformer
-    over the behavior sequence, fused with a hypergraph intent encoder. Training follows src/model.py
-    (training_step) and src/dataloaders/rec_dataloader.py: each position predicts the next event, kept as a target
-    with probability mask_prob; the loss is next-item cross-entropy (full softmax over num_items + 1 rows) plus
-    next-behavior cross-entropy, an item-behavior InfoNCE on one sampled target per sequence, and inter- and
-    intra-intent InfoNCE terms. Scoring reads the last L events and uses the output at the last position
-    (validation_step)."""
 
-    CONFIGS = {  # src/configs/{ijcai,retail}/*_missl.yaml; the Alibaba logs use the IJCAI configuration
+    CONFIGS = {
         "ijcai": {"batch": 8, "accum": 8, "epsilon": 0.6, "item_beh_lambda": 0.05, "next_item_lambda": 1.0,
                   "next_beh_lambda": 1.0, "inter_intent_lambda": 0.05, "intra_intent_lambda": 0.05},
         "retail": {"batch": 128, "accum": 1, "epsilon": 1.0, "item_beh_lambda": 0.01, "next_item_lambda": 1.0,
@@ -285,7 +239,7 @@ class MISSLMB(nn.Module):
         c = self.CONFIGS[name]
         self.n_items, self.L, self.d = n_items, 50, 16
         m = _import_models("missl")
-        os.environ.pop("CUDA_LAUNCH_BLOCKING", None)  # set by missl.py for debugging; CUDA is already initialized
+        os.environ.pop("CUDA_LAUNCH_BLOCKING", None)
         self.cl = m
         self.backbone = m.MISSL(max_len=self.L, num_items=n_items, n_layer=2, n_head=2, n_b=4, d_model=self.d,
                                 dropout=0.2, buy=2, intent_num=64, nb=24, hhgt_num_head=2, hhgt_num_layer=2,
@@ -297,10 +251,10 @@ class MISSLMB(nn.Module):
         self.head_b = m.DotProductPredictionHead(self.d, 4, self.backbone.embedding.typeToken)
         self.hp = {**c, "config": name, "lr": 1e-3, "wd": 1e-6, "betas": (0.9, 0.999), "mask_prob": 0.7, "d": self.d,
                    "max_len": self.L, "layers": 2, "heads": 2, "intent_num": 64, "loss": "full softmax + behavior CE + InfoNCE",
-                   "patience": 10, "max_epochs": 1000}  # Lightning EarlyStopping(patience=10), default max_epochs
+                   "patience": 10, "max_epochs": 1000}
 
     def batches(self, data, rng):
-        yield from data.cloze_windows(self.L + 1, self.hp["batch"], rng)  # L inputs and their next events
+        yield from data.cloze_windows(self.L + 1, self.hp["batch"], rng)
 
     def train_loss(self, batch, rng):
         items, behs, uids = batch
@@ -314,13 +268,11 @@ class MISSLMB(nn.Module):
         flat_i, flat_t = item_out.reshape(-1, H), type_out.reshape(-1, H)
         valid = keep.reshape(-1)
         lab_i, lab_b = nxt.reshape(-1)[valid], bnxt.reshape(-1)[valid]
-        # next item: exact softmax over the head's vocabulary (num_items + 1 rows), computed in chunks
         z = self.head_i.ln(self.head_i.out(flat_i[valid]))
         W, bias = self.head_i.token_embeddings.weight, self.head_i.bias[0]
         V = self.n_items + 1
         loss_i = _full_ce(z, (z * W[lab_i]).sum(-1) + bias[lab_i], lambda zz, s, e: zz @ W[s:e].T + bias[s:e], V)
         loss_b = F.cross_entropy(self.head_b(flat_t[valid], None), lab_b, ignore_index=0)
-        # item-behavior InfoNCE on one randomly chosen target position per sequence
         rows = keep.any(1)
         pick = (torch.rand(keep.shape, device=keep.device) * keep).argmax(1)
         sidx = (torch.arange(len(keep), device=keep.device) * keep.shape[1] + pick)[rows]
@@ -348,7 +300,7 @@ class MISSLMB(nn.Module):
 
 
 def _mbgen(*args):
-    from .mbgen import MBGen  # imports HuggingFace transformers, needed by MBGen only
+    from .mbgen import MBGen
     return MBGen(*args)
 
 

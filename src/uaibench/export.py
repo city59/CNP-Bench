@@ -1,16 +1,3 @@
-"""Export model-ready data for one processed run into data/bench/<run>/.
-
-Files
-  meta.json      configuration, split bounds, vocabulary sizes
-  events.npz     all events of the sampled users with training-period items: u (dense), i (1..N), b (1..4), ts, day
-  uai_eval.npz   val/test candidates of UAIBench queries with at least two outcome classes (+ features)
-  uai_train.npz  training-period candidates for supervised UAI scorers (all candidates of queries with a
-                 conversion, plus a 5% sample of the remaining candidates)
-  std_eval.npz   standard protocol: first val/test-period purchase per user, 1 positive + 99 negatives that
-                 exclude every item the user interacted with before the purchase
-
-python -m src.uaibench.export taobao_r0.2
-"""
 
 import json
 import sys
@@ -35,7 +22,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     buckets = sorted(proc.glob("bucket_*.npz"))
     g1 = pass1(buckets, Config())
-    items = g1["train_items"]  # sorted raw ids
+    items = g1["train_items"]
     n_items = len(items)
     bounds = g1["bounds"]
     ev_parts, eval_parts, train_parts, std_parts = [], [], [], []
@@ -52,7 +39,6 @@ def main() -> None:
         tr = df[(df.split == 0)]
         keep = hasc[(df.split == 0).to_numpy()].astype(bool) | (rng.random(len(tr)) < 0.05)
         train_parts.append(tr.loc[keep, cols])
-        # model-ready events: training-vocabulary items only
         pos = np.searchsorted(items, ev.i.to_numpy())
         pos_c = np.minimum(pos, n_items - 1)
         known = items[pos_c] == ev.i.to_numpy()
@@ -61,7 +47,6 @@ def main() -> None:
         e = e.sort_values(["u", "ts", "b"], kind="stable")
         ev_parts.append(e)
         user_ids.append(np.unique(ev.u.to_numpy()))
-        # standard protocol instances
         for s in (1, 2):
             lo, hi = bounds[s]
             buys = e[(e.b == BUY + 1) & (e.day >= lo) & (e.day < hi)]
@@ -90,7 +75,7 @@ def main() -> None:
                              .assign(**{f"n{j}": negs[:, j] for j in range(n_neg)}))
     users = np.unique(np.concatenate(user_ids))
     E = pd.concat(ev_parts, ignore_index=True)
-    umap = lambda x: np.searchsorted(users, x) + 1  # dense user ids, 0 = padding
+    umap = lambda x: np.searchsorted(users, x) + 1
     np.savez(out / "events.npz", u=umap(E.u.to_numpy()), i=E.i.to_numpy(np.int64), b=E.b.to_numpy(np.int8),
              ts=E.ts.to_numpy(np.int64), day=E.day.to_numpy(np.int32))
     for name, parts in (("uai_eval", eval_parts), ("uai_train", train_parts)):

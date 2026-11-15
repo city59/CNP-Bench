@@ -1,4 +1,3 @@
-"""CLI: python -m src.uaibench.run <dataset> [options]."""
 
 from __future__ import annotations
 

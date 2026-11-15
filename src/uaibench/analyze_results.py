@@ -1,7 +1,3 @@
-"""Aggregate eval_results.json of all datasets and compute rank correlations.
-
-python -m src.uaibench.analyze_results  -> evidence/uaibench_v1/results_summary.json (+ printed tables)
-"""
 
 import json
 from pathlib import Path

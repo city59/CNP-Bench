@@ -13,10 +13,10 @@ from .mbsr_models import BUY, MODELS
 from .metrics import cc_ndcg
 
 ROOT = Path(__file__).resolve().parents[2]
-MIN_DELTA = 0.0  # Lightning EarlyStopping default; RecBole counts any increase
+MIN_DELTA = 0.0
 VAL_CAP = 10000
-MEM_FRACTION = {"mbgen": 0.4, "mbht": 0.35, "mbstr": 0.3, "pbat": 0.3}  # of 16 GB
-SMOKE = int(os.environ.get("UAI_SMOKE_STEPS", 0))  # >0: time this many training batches and one validation, save nothing
+MEM_FRACTION = {"mbgen": 0.4, "mbht": 0.35, "mbstr": 0.3, "pbat": 0.3}
+SMOKE = int(os.environ.get("UAI_SMOKE_STEPS", 0))
 
 
 class Data:
@@ -43,7 +43,6 @@ class Data:
         self.uai = dict(np.load(d / "uai_eval.npz"))
         self.std = dict(np.load(d / "std_eval.npz"))
         rng = np.random.default_rng(seed)
-        # fixed validation subsamples
         m = self.uai["split"] == 1
         q = self.uai["uid"].astype(np.int64) * 100000 + self.uai["t"]
         uq = np.unique(q[m])
@@ -53,7 +52,6 @@ class Data:
         self.std_val_idx = np.sort(rng.choice(sv, min(VAL_CAP, len(sv)), replace=False))
 
     def gather(self, uids, ends, L):
-        """Left-padded last-L events of each user before global position `ends`."""
         uids, ends = np.asarray(uids, np.int64), np.asarray(ends, np.int64)
         idx = ends[:, None] - L + np.arange(L)[None, :]
         valid = idx >= self.ustart[uids][:, None]
@@ -66,12 +64,10 @@ class Data:
 
     def _window(self, users, s, ends, L):
         it, bh = self.gather(users, ends, L)
-        it = np.where(np.arange(L)[None, :] >= L - (ends - s)[:, None], it, 0)  # never before the training start
+        it = np.where(np.arange(L)[None, :] >= L - (ends - s)[:, None], it, 0)
         return it, np.where(it > 0, bh, 0)
 
     def cloze_windows(self, L, batch, rng):
-        """MB-STR / PBAT RecTrainDataset: every training user once per epoch in random order; the last L events of
-        the training sequence, or for longer sequences with probability 0.2 a uniformly placed window of L."""
         users, s, e = self._train_users()
         n = e - s
         rand = (n > L) & (rng.random(len(n)) >= 0.8)
@@ -84,7 +80,6 @@ class Data:
             yield it, bh, users[sel]
 
     def purchase_instances(self, L, batch, rng):
-        """One random training purchase per user per epoch, with its preceding events as history."""
         pos = self.tr_buy[rng.permutation(len(self.tr_buy))]
         u = self.u[pos]
         _, first = np.unique(u, return_index=True)
@@ -108,7 +103,6 @@ def _is_oom(e):
 
 
 def _state_halving(model, it_t, bh_t, u_t):
-    """model.state on a batch; when the shared GPU runs short of memory, retry on halves (same result)."""
     try:
         return model.state(it_t, bh_t, u_t)
     except RuntimeError as e:
@@ -134,7 +128,7 @@ def states(model, data, uids, ends, dev, bs=None):
             hz = _state_halving(model, it_t[nz], bh_t[nz], u_t[nz])
             h = torch.zeros((len(it), hz.shape[1]), device=dev)
             h[nz] = hz
-        out.append(h)  # users without any prior event keep a zero state: constant (tied) scores
+        out.append(h)
     width = max(x.shape[1] for x in out)
     return torch.cat([torch.nn.functional.pad(x, (0, width - x.shape[1])) for x in out])
 
@@ -178,7 +172,7 @@ def _score_halving(model, hh, cc):
 
 
 def uai_scores(model, data, dev, mask):
-    if hasattr(model, "uai_scores"):  # MBGen scores by generation, see mbgen.py
+    if hasattr(model, "uai_scores"):
         return model.uai_scores(data, dev, mask)
     U = data.uai
     uid, t, items = U["uid"][mask].astype(np.int64), U["t"][mask], U["item"][mask]
@@ -190,7 +184,7 @@ def uai_scores(model, data, dev, mask):
 
 
 def std_scores(model, data, dev, idx):
-    if hasattr(model, "std_scores"):  # MBGen scores by generation, see mbgen.py
+    if hasattr(model, "std_scores"):
         return model.std_scores(data, dev, idx)
     S = data.std
     uid, ts = S["uid"][idx].astype(np.int64), S["ts"][idx].astype(np.int64)
@@ -202,7 +196,7 @@ def std_scores(model, data, dev, idx):
 
 @torch.no_grad()
 def std_full_rank(model, data, dev, idx):
-    if hasattr(model, "std_full_rank"):  # MBGen scores by generation, see mbgen.py
+    if hasattr(model, "std_full_rank"):
         return model.std_full_rank(data, dev, idx)
     S = data.std
     _, h, ends = std_scores(model, data, dev, idx)
@@ -254,9 +248,7 @@ def _cpu_state(model):
 
 
 def train_epoch(model, opt, data, rng, dev):
-    """One epoch of the release's training loop; hp["accum"] micro-batches per optimizer step (Lightning's
-    accumulate_grad_batches times the number of DDP processes, whose gradients are averaged)."""
-    if hasattr(model, "fit_epoch"):  # MBGen keeps its own optimizer, schedule, and mixed precision
+    if hasattr(model, "fit_epoch"):
         return model.fit_epoch(data, rng, dev)
     accum = model.hp.get("accum", 1)
     losses, pending = [], 0
@@ -287,7 +279,6 @@ def main():
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     dev = torch.device("cuda")
-    # several runs share one 16 GB GPU; a cap keeps PyTorch's cache from overflowing into (slow) shared memory
     torch.cuda.set_per_process_memory_fraction(float(os.environ.get("UAI_MEM_FRACTION", MEM_FRACTION.get(kind, 0.35))))
     t0 = time.time()
     data = Data(run, seed)
@@ -298,13 +289,12 @@ def main():
     if not hasattr(model, "fit_epoch"):
         opt = torch.optim.Adam(model.parameters(), lr=hp["lr"], weight_decay=hp["wd"], betas=hp["betas"])
     else:
-        model.setup_training(data, dev)  # sets hp["max_epochs"] from the release's step budget
+        model.setup_training(data, dev)
     max_epochs = int(os.environ.get("UAI_MAX_EPOCHS", hp["max_epochs"]))
     patience = int(os.environ.get("UAI_PATIENCE", hp["patience"]))
     best = {"uai": [-1.0, None, -1], "std": [-1.0, None, -1]}
     stale = {"uai": 0, "std": 0}
     log, start = [], 0
-    # resumable: a multi-day schedule must survive restarts of the machine
     ck = data.dir / f"ckpt_{kind}_s{seed}.pt"
     if ck.exists():
         c = torch.load(ck, map_location="cpu")
@@ -318,7 +308,7 @@ def main():
         try:
             torch.set_rng_state(c["torch_rng"])
             torch.cuda.set_rng_state(c["cuda_rng"])
-        except RuntimeError:  # checkpoint written by another PyTorch version (run moved between machines)
+        except RuntimeError:
             torch.manual_seed(seed + c["epoch"] + 1)
             print("torch RNG state incompatible; reseeded", flush=True)
         t0 -= log[-1]["sec"]

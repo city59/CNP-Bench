@@ -1,11 +1,3 @@
-"""Construct prospective UAI queries from canonical buckets and evaluate scorers.
-
-Pass 1 (global): split boundaries, training item vocabulary, training purchase
-popularity, auxiliary-to-purchase delays (for the horizon rule) and purchase
-statistics. Pass 2 (per bucket): activity-triggered daily anchors, candidate
-sets, features and outcome labels. Pass 3: metrics with the training-estimated
-Returned gain g.
-"""
 
 from __future__ import annotations
 
@@ -19,18 +11,18 @@ import pandas as pd
 from .adapters import BUY, CART, FAV
 from .metrics import CONVERTED, RETURNED, SILENT, query_metrics, random_ndcg
 
-SHIFT = 4096  # day slots per key; all logs are far shorter
-IBITS = 23     # item ids must be < 2**23
+SHIFT = 4096
+IBITS = 23
 
 
 @dataclass
 class Config:
     split: tuple = (0.6, 0.2, 0.2)
-    delta: int | None = None          # None -> derived by the coverage rule
+    delta: int | None = None
     delta_grid: tuple = (1, 2, 3, 7, 14)
     coverage: float = 0.8
-    window: int | None = None         # None -> W = delta
-    warmup: int | None = None         # None -> W
+    window: int | None = None
+    warmup: int | None = None
     exclude_repurchase: bool = True
     k: int = 10
     n_boot: int = 1000
@@ -48,7 +40,6 @@ def _pk(u, i):
 
 
 class PairIndex:
-    """Sorted per-pair auxiliary day records of one bucket."""
 
     def __init__(self, ev: pd.DataFrame):
         assert ev.i.max() < 2**IBITS
@@ -90,10 +81,9 @@ class PairIndex:
 def split_bounds(n_days: int, split: tuple) -> list:
     a = int(round(n_days * split[0]))
     b = int(round(n_days * (split[0] + split[1])))
-    return [(0, a), (a, b), (b, n_days)]  # half-open day ranges
+    return [(0, a), (a, b), (b, n_days)]
 
 
-# ---------------------------------------------------------------- pass 1
 def pass1(buckets: list, cfg: Config) -> dict:
     n_days = 0
     for p in buckets:
@@ -113,11 +103,9 @@ def pass1(buckets: list, cfg: Config) -> dict:
         items.append(np.unique(tr.i))
         pops.append(tr[tr.b == BUY].i.to_numpy())
         idx = PairIndex(ev)
-        # first purchases and the last auxiliary day strictly before the purchase day
         hi = np.searchsorted(idx.comb, idx.fb_pk * SHIFT + idx.fb_day, side="left")
         prev_ok = (hi > 0) & (idx.comb[np.maximum(hi - 1, 0)] // SHIFT == idx.fb_pk)
         prev_day = np.where(prev_ok, idx.comb[np.maximum(hi - 1, 0)] % SHIFT, -1)
-        # any auxiliary event at or before the purchase timestamp is approximated at day level
         same_or_before = np.searchsorted(idx.comb, idx.fb_pk * SHIFT + idx.fb_day, side="right")
         any_prior = (same_or_before > 0) & (idx.comb[np.maximum(same_or_before - 1, 0)] // SHIFT == idx.fb_pk)
         for name, (lo, hi_d) in zip(("train", "val", "test"), bounds):
@@ -127,7 +115,7 @@ def pass1(buckets: list, cfg: Config) -> dict:
         delays.append(idx.fb_day[m] - prev_day[m])
     train_items = np.unique(np.concatenate(items))
     full = Path(buckets[0]).parent / "buy_counts_all_users.npz"
-    if full.exists():  # population-level training purchases (independent of user sampling)
+    if full.exists():
         z = np.load(full)
         m = z["day"] < tr_end
         s = pd.Series(z["count"][m]).groupby(z["item"][m]).sum()
@@ -158,7 +146,6 @@ def pass1(buckets: list, cfg: Config) -> dict:
     }
 
 
-# ---------------------------------------------------------------- pass 2
 def candidates(ev: pd.DataFrame, g1: dict) -> tuple[pd.DataFrame, dict]:
     idx = PairIndex(ev)
     W, D = g1["window"], g1["delta"]
@@ -166,7 +153,7 @@ def candidates(ev: pd.DataFrame, g1: dict) -> tuple[pd.DataFrame, dict]:
     last_anchor = np.zeros(3, np.int64)
     for s, (lo, hi) in enumerate(g1["bounds"]):
         split_of[lo:hi] = s
-        last_anchor[s] = hi - 1 - D  # window (t, t+D] must stay inside the split
+        last_anchor[s] = hi - 1 - D
     keys = []
     u_all = idx.pk >> IBITS
     for k in range(W):
@@ -209,7 +196,6 @@ def candidates(ev: pd.DataFrame, g1: dict) -> tuple[pd.DataFrame, dict]:
         "cart_w": (idx.cart[hi] - idx.cart[lo]) > 0, "cart_all": (idx.cart[hi] - idx.cart[first]) > 0,
         "fav_all": (idx.fav[hi] - idx.fav[first]) > 0,
         "last_ts": idx.last[hi - 1], "first_day": idx.comb[first] % SHIFT, "pop": pop,
-        # Returned at t, converted in the following window: used only on training anchors for g
         "conv_next": (fb > t + D) & (fb <= t + 2 * D),
         "next_window_ok": t + 2 * D <= last_anchor[s] + D,
     })
@@ -220,13 +206,11 @@ def scores(df: pd.DataFrame, seed: int) -> dict:
     cols = np.column_stack([df.cart_all.to_numpy(np.int64), df.fav_all.to_numpy(np.int64),
                             df.cnt_all.to_numpy(np.int64), df.last_ts.to_numpy(np.int64)])
     strength = np.lexsort(cols.T[::-1])
-    # equal keys must share a score for tie-aware metrics
     key = cols[strength]
     newgrp = np.r_[True, (key[1:] != key[:-1]).any(axis=1)] if len(key) else np.zeros(0, bool)
     rank = np.empty(len(df))
     rank[strength] = np.cumsum(newgrp)
     return {
-        # a constant score ties every item; tie-aware metrics then equal the exact random-order expectation
         "random": np.zeros(len(df)),
         "recency": df.last_ts.to_numpy(float),
         "frequency": df.cnt_all.to_numpy(float),
@@ -235,7 +219,6 @@ def scores(df: pd.DataFrame, seed: int) -> dict:
     }
 
 
-# ---------------------------------------------------------------- pass 3
 def evaluate(df: pd.DataFrame, g: float, k: int, seed: int) -> pd.DataFrame:
     df = df.sort_values(["u", "t"], kind="stable").reset_index(drop=True)
     sc = scores(df, seed)
@@ -296,7 +279,6 @@ def run(buckets: list, cfg: Config) -> tuple[dict, pd.DataFrame]:
     sizes = {n: pd.Series(dtype=float) for n in sup}
     g_num = g_den = gs_num = gs_den = 0
     test_conv = 0
-    # users are disjoint across buckets, so query/user counts add up
     for p in buckets:
         df, st = candidates(_load(p), g1)
         for k_, v in st.items():

@@ -16,11 +16,6 @@ def user_hash(u: np.ndarray) -> np.ndarray:
 
 
 class BuyCounter:
-    """Purchase counts per (item, epoch day) over ALL users, before user sampling.
-
-    Item popularity is a global training-period statistic; computing it on the
-    sampled users only would make it degenerate at small sampling rates.
-    """
 
     def __init__(self):
         self.keys, self.counts = [], []
@@ -73,11 +68,11 @@ def _chunks_retailrocket(path: Path, chunksize: int):
         ts = c["timestamp"].to_numpy(np.int64) // 1000
         yield pd.DataFrame(
             {"u": c["visitorid"], "i": c["itemid"], "b": c["event"].map(codes).astype(np.int8), "ts": ts}
-        ).assign(day=lambda d: (d.ts // 86400).astype(np.int64))  # UTC days
+        ).assign(day=lambda d: (d.ts // 86400).astype(np.int64))
 
 
 TAOBAO_START = int(dt.datetime(2017, 11, 25, tzinfo=dt.timezone(dt.timedelta(hours=8))).timestamp())
-TAOBAO_END = TAOBAO_START + 9 * 86400  # official window: 2017-11-25 .. 2017-12-03 (UTC+8)
+TAOBAO_END = TAOBAO_START + 9 * 86400
 
 
 def _chunks_taobao(path: Path, chunksize: int):
@@ -93,7 +88,7 @@ def _chunks_taobao(path: Path, chunksize: int):
             c = c[(c.ts >= TAOBAO_START) & (c.ts < TAOBAO_END)]
             yield pd.DataFrame(
                 {"u": c.u, "i": c.i, "b": c.beh.astype(str).map(codes).astype(np.int8), "ts": c.ts}
-            ).assign(day=lambda d: (d.ts + 8 * 3600) // 86400)  # Beijing calendar days
+            ).assign(day=lambda d: (d.ts + 8 * 3600) // 86400)
 
 
 def _chunks_ijcai15(path: Path, chunksize: int, include_double11: bool):
@@ -103,8 +98,6 @@ def _chunks_ijcai15(path: Path, chunksize: int, include_double11: bool):
     with zf.open(name) as fh:
         for c in pd.read_csv(fh, usecols=["user_id", "item_id", "time_stamp", "action_type"], chunksize=chunksize):
             mmdd = c["time_stamp"].to_numpy(np.int64)
-            # explicit log end: a handful of stray 11-12 records would otherwise extend the
-            # last split with empty days and silently turn late windows into Silent labels
             keep = mmdd <= (1111 if include_double11 else 1110)
             c, mmdd = c[keep], mmdd[keep]
             days = pd.to_datetime({"year": 2015, "month": mmdd // 100, "day": mmdd % 100})
@@ -116,13 +109,6 @@ def _chunks_ijcai15(path: Path, chunksize: int, include_double11: bool):
 
 
 def _chunks_tmall(raw_dir: Path, chunksize: int, rate: float, buys: "BuyCounter | None" = None):
-    """Rec-Tmall log (Tianchi 140281), full files: '\\x01'-separated, no header,
-    item_id (int), user_id ('u…'), action, vtime 'YYYY-mm-dd HH:MM:SS' (Beijing time).
-    (The 155 KB web sample uses a different, comma-separated layout.)
-
-    The log has ~1.33 billion rows, so users are filtered by hash before the
-    timestamp column is parsed.
-    """
     codes = {"click": VIEW, "collect": FAV, "cart": CART, "alipay": BUY}
     thr = np.uint64(int(round(rate * 10_000)))
     for part in sorted(raw_dir.glob("tianchi_2014002_rec_tmall_log.part*.zip")):
@@ -147,7 +133,7 @@ def _chunks_tmall(raw_dir: Path, chunksize: int, rate: float, buys: "BuyCounter 
                     sec = (ts - pd.Timestamp("1970-01-01")).dt.total_seconds().to_numpy(np.int64)
                     yield pd.DataFrame({"u": u, "i": c.item_id.to_numpy(np.int64),
                                         "b": c.action.map(codes).astype(np.int8).to_numpy(),
-                                        "ts": sec - 8 * 3600, "day": sec // 86400})  # local calendar days
+                                        "ts": sec - 8 * 3600, "day": sec // 86400})
 
 
 def convert(dataset: str, raw: Path, out_dir: Path, rate: float, n_buckets: int,
@@ -167,12 +153,11 @@ def convert(dataset: str, raw: Path, out_dir: Path, rate: float, n_buckets: int,
     n_raw = 0
     for c in chunks:
         n_raw += len(c)
-        if dataset != "tmall":  # tmall counts purchases inside the generator, before sampling
+        if dataset != "tmall":
             m = (c["b"] == BUY).to_numpy()
             buys.add(c["i"].to_numpy()[m], c["day"].to_numpy()[m])
         _emit(c, rate, n_buckets, store)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # data-quality guard: drop leading/trailing days whose volume is < min_day_share of the median day
     all_days = np.concatenate([p[3].astype(np.int64) for parts in store.values() for p in parts])
     lo_day = int(all_days.min())
     vol = np.bincount(all_days - lo_day)
@@ -188,7 +173,7 @@ def convert(dataset: str, raw: Path, out_dir: Path, rate: float, n_buckets: int,
         day = day.astype(np.int64)
         m = (day >= day_first) & (day <= day_last)
         df = pd.DataFrame({"u": u[m], "i": i[m], "b": beh[m], "day": day[m] - day0, "ts": ts[m]})
-        df = df.drop_duplicates(["u", "i", "b", "ts"])  # exact duplicate tuples only
+        df = df.drop_duplicates(["u", "i", "b", "ts"])
         n_kept += len(df)
         np.savez(out_dir / f"bucket_{b:03d}.npz", **{k: df[k].to_numpy() for k in df.columns})
     bi, bd, bc = buys.result()

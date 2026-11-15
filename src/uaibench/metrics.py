@@ -1,9 +1,3 @@
-"""Query-level metrics for UAI ranking.
-
-All ranking metrics are tie-aware: items with equal scores share the average
-discount of the positions they jointly occupy, which equals the expected metric
-under a uniformly random tie order (McSherry and Najork, 2008).
-"""
 
 from __future__ import annotations
 
@@ -24,7 +18,6 @@ def tie_aware_dcg(gains: np.ndarray, scores: np.ndarray, k: int) -> float:
     s = scores[order]
     g = gains[order]
     disc = _discounts(len(s), k)
-    # boundaries of equal-score groups in sorted order
     starts = np.flatnonzero(np.r_[True, s[1:] != s[:-1]])
     ends = np.r_[starts[1:], len(s)]
     csum = np.r_[0.0, np.cumsum(disc)]
@@ -34,7 +27,6 @@ def tie_aware_dcg(gains: np.ndarray, scores: np.ndarray, k: int) -> float:
 
 
 def cc_ndcg(gains: np.ndarray, scores: np.ndarray, k: int = 10) -> float:
-    """Chance-corrected NDCG: 0 for a random order, 1 for the ideal order."""
     n = len(gains)
     disc = _discounts(n, k)
     ideal = float(np.dot(np.sort(gains)[::-1], disc))
@@ -68,14 +60,6 @@ def pair_auc(pos: np.ndarray, neg: np.ndarray) -> float:
 
 
 def query_metrics(labels: np.ndarray, scores: np.ndarray, g: float | None = None, k: int = 10) -> dict:
-    """labels use CONVERTED/RETURNED/SILENT codes.
-
-    Conversion task: Converted vs the rest. Re-engagement task: Converted or
-    Returned vs Silent. Conditional diagnostic: Converted vs Returned. The
-    graded variant (gain g for Returned) is kept only as a sensitivity check:
-    per-query normalization rescales any g > 0 to full weight on queries
-    without a conversion.
-    """
     conv = (labels == CONVERTED).astype(float)
     eng = (labels != SILENT).astype(float)
     c, r, s = (scores[labels == x] for x in (CONVERTED, RETURNED, SILENT))
