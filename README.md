@@ -37,7 +37,6 @@ python -m src.uaibench.train_mbsr tmall_r0.015 mbgen 2026
 
 # evaluate
 python -m src.uaibench.evaluate_models tmall_r0.015 1000
-python -m src.uaibench.raw_vs_cc tmall_r0.015
 python -m src.uaibench.analyze_results
 ```
 
