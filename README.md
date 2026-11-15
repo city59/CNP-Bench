@@ -20,8 +20,6 @@ The raw logs are not redistributed. Download them into `data/raw/`:
 | IJCAI-15 | https://tianchi.aliyun.com/dataset/42 | `ijcai15/data_format1.zip` |
 | RetailRocket | https://www.kaggle.com/datasets/retailrocket/ecommerce-dataset | `retailrocket/events.csv` |
 
-Check the files with `cd data/raw && sha256sum -c SHA256SUMS`.
-
 ## Run
 
 ```bash
@@ -39,6 +37,3 @@ python -m src.uaibench.train_mbsr tmall_r0.015 mbgen 2026
 python -m src.uaibench.evaluate_models tmall_r0.015 1000
 python -m src.uaibench.analyze_results
 ```
-
-`python -m src.uaibench.test_metrics` checks the metric implementation. MBSRec is not included here; see its official
-release at https://github.com/Shereen-Elsayed/MBSRec.
