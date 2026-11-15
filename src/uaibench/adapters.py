@@ -1,10 +1,3 @@
-"""Raw-log adapters: map each dataset to canonical events.
-
-Canonical behavior codes: VIEW=0, FAV=1, CART=2 (auxiliary) and BUY=3 (target).
-`day` is a local-calendar day index starting at 0; `ts` is seconds (day-level
-logs use the start of the day). Users are sampled and bucketed by a fixed
-multiplicative hash of the raw user id, so sampling never looks at outcomes.
-"""
 
 from __future__ import annotations
 
