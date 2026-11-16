@@ -1,6 +1,5 @@
 # CNP-Bench
 
-A benchmark of multi-behavior sequential recommenders on unconverted auxiliary interactions.
 
 ## Setup
 
