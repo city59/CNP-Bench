@@ -1,4 +1,4 @@
-# CNP-Bench
+# CMP-Bench
 
 
 ## Setup
